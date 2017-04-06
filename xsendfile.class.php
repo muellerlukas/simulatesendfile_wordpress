@@ -152,6 +152,7 @@ class xsendfile
 				{
 					$weburi = self::$_linkDirUri . $secret . '/' . $filename;
 				}
+				
 				header('Location: ' . $weburi);
 				break; // end the loop
 			}

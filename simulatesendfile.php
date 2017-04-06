@@ -33,6 +33,7 @@ class simulatesendfile
 			wp_schedule_event(time(), 'hourly', self::$_cronName);
 		}
 		
+		$_SERVER['SERVER_SOFTWARE'] = 'nginx';
 		register_deactivation_hook(__FILE__, array(__CLASS__, 'disable'));
 	}
 	
@@ -49,6 +50,6 @@ class simulatesendfile
 	   wp_unschedule_event( $timestamp, self::$_cronName);
 	}
 }
-add_action( 'init', array('mulu\simulatesendfile', 'init'));
 
+add_action( 'init', array('mulu\simulatesendfile', 'init'));
 ?>
