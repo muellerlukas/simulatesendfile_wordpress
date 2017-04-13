@@ -19,11 +19,14 @@ class simulatesendfile
 		add_option('simulatesendfile_dir', 'symlinks');
 		add_option('simulatesendfile_expire', 3600);
 		
-		xsendfile::setLinkDir(WP_CONTENT_DIR . '/' . get_option('simulatesendfile_dir', 'symlinks') . '/');
-		xsendfile::setLinkDirUri(content_url() . '/' . get_option('simulatesendfile_dir', 'symlinks') . '/');
-		xsendfile::setExpireTime(get_option('simulatesendfile_expire', 3600));
-		xsendfile::register();
-		
+		// only if link dir could be created and is writable
+		if (xsendfile::setLinkDir(WP_CONTENT_DIR . '/' . get_option('simulatesendfile_dir', 'symlinks') . '/'))
+		{
+			xsendfile::setLinkDirUri(content_url() . '/' . get_option('simulatesendfile_dir', 'symlinks') . '/');
+			xsendfile::setExpireTime(get_option('simulatesendfile_expire', 3600));
+			xsendfile::setSalt(NONCE_SALT);
+			xsendfile::register();
+		}
 		// register wp_cron
 		add_action(self::$_cronName, array(__CLASS__, 'runGBC'));
 
@@ -32,13 +35,12 @@ class simulatesendfile
 		{
 			wp_schedule_event(time(), 'hourly', self::$_cronName);
 		}
-		
-		$_SERVER['SERVER_SOFTWARE'] = 'nginx';
+			
+		// deregister plugin
 		register_deactivation_hook(__FILE__, array(__CLASS__, 'disable'));
 	}
 	
 
-	
 	public static function runGBC()
 	{
 		xsendfile::runGBC();
@@ -46,8 +48,7 @@ class simulatesendfile
 	
 	public static function disable()
 	{
-	   $timestamp = wp_next_scheduled(self::$_cronName);
-	   wp_unschedule_event( $timestamp, self::$_cronName);
+	   wp_unschedule_event(wp_next_scheduled(self::$_cronName), self::$_cronName);
 	}
 }
 

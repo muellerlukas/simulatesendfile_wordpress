@@ -25,6 +25,8 @@ class xsendfile
 	protected static $_linkDir = '';
 	protected static $_linkDirUri = '';
 	protected static $_expireTime = 3600; // default: 1h
+	protected static $_salt = '';
+	protected static $_dirOk = false;
 
 	/**
 	* Defines the directory for symlinks
@@ -54,7 +56,9 @@ class xsendfile
 		}
 		
 		self::$_linkDir = $dir;
-		return true;
+
+		self::$_dirOk = is_writable($dir);
+		return self::$_dirOk;
 	}
 	
 	/**
@@ -65,6 +69,17 @@ class xsendfile
 	public static function setLinkDirUri($uri)
 	{
 		self::$_linkDirUri = $uri;
+		return true;
+	}
+	
+	/**
+	* Sets the salt to use
+	* @param	string	the salt
+	*/
+	public static function setSalt($salt)
+	{
+		self::$_salt = $salt;
+		return true;
 	}
 	
 	/**
@@ -77,8 +92,18 @@ class xsendfile
 		if (is_numeric($seconds))
 		{
 			self::$_expireTime = $seconds;
+			return true;
 		}
 		return false;
+	}
+	
+	/**
+	* returns if is right configured
+	* @return	bool	plugin ok
+	*/
+	public static function isActive()
+	{
+		return self::$_dirOk;
 	}
 	
 	/**
@@ -86,14 +111,13 @@ class xsendfile
 	*/
 	public static function rewrite()
 	{
-		// symlink-dir not set or header already sent
-		if (empty(self::$_linkDir) || headers_sent())
-			return;
-		header("Content-Type: text/plain");
-		$headers = headers_list(); // load all send headers
+		// not active or header already sent
+		if (!self::isActive() || headers_sent())
+			return false;
+		
 		$sendfile = false;
 		$filename = '';
-		foreach($headers as $header)
+		foreach(headers_list() as $header)
 		{
 			// explode key and value
 			$data = explode(': ', $header);
@@ -104,24 +128,27 @@ class xsendfile
 				case 'X-Accel-Redirect': // nginx version
 				case 'X-Lighttpd-Sendfile': // lighty version
 					$sendfile = $data[1];
-					header_remove($data[0]);
 				break;
 				case 'Content-Disposition': // includes the filename
 					if(preg_match('~filename=(.*)$~is', $data[1], $matchFn))
 						$filename = trim($matchFn[1], '";');
-					header_remove($data[0]);
 				break;
 			}
 		}
 		if ($sendfile === false)
 			return;
 		
+		// now remove no longer needed headers
+		header_remove('X-Sendfile');
+		header_remove('X-Accel-Redirect');
+		header_remove('X-Lighttpd-Sendfile');
+		header_remove('Content-Disposition');
 		
-		// we will break the loop if available secret dir found
+		// break the loop if available secret dir found
 		while(true)
 		{
-			$secret = md5($sendfile . rand()); // secret hash for symlink directory
-			$secretDir = self::$_linkDir . $secret . '/'; // absolute path to secret directory
+			$secret = sha1($sendfile . rand() . self::$_salt); // secret hash for symlink directory
+			$secretDir = self::$_linkDir . $secret . '/'; // path to secret directory
 			if (!is_dir($secretDir))
 			{
 				// not a absolute path
@@ -130,11 +157,12 @@ class xsendfile
 					// fixes for windows-os
 					if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN')
 					{
-						// we need to add the drive letter
+						// need to add the drive letter
 						$sendfile = substr(__FILE__, 0, 1) . ':' . $sendfile;
 					}
 					else
 					{
+						// convert to absolute from $sendfile as seen from calling script-dir
 						$sendfile = dirname(getenv('SCRIPT_FILENAME')). '/' . $sendfile;
 					}
 				}
@@ -144,7 +172,6 @@ class xsendfile
 					$filename = basename($sendfile);
 				
 				mkdir($secretDir);
-				#die($sendfile . '-' .  $secretDir . utf8_decode($filename));
 				symlink($sendfile, $secretDir . utf8_decode($filename));
 				
 				// create web path
@@ -182,7 +209,6 @@ class xsendfile
 				continue;
 			
 			// delete all files in dir
-			$files = glob($linkdir . '/*');
 			array_walk(glob($linkdir . '/*'), array(__CLASS__, 'unlink'));
 			
 			// and the dir itself
