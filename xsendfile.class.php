@@ -24,9 +24,13 @@ class xsendfile
 {
 	protected static $_linkDir = '';
 	protected static $_linkDirUri = '';
-	protected static $_expireTime = 3600; // default: 1h
+	protected static $_expireTime = 60; // default: 1 minute. After the download started it will be finished, wheter the file is "deleted" or not.
 	protected static $_salt = '';
 	protected static $_dirOk = false;
+	protected static $_disallowedExt = [];
+	protected static $_callbacks = [];
+	protected static $_headerWorker = [__CLASS__, 'headerWorker'];
+	protected static $_externalUrlSymlink = false; // used, when the sendfile is external
 
 	/**
 	* Defines the directory for symlinks
@@ -39,6 +43,7 @@ class xsendfile
 		// non existing dir
 		if (!is_dir($dir))
 		{
+			
 			if ($create)
 			{
 				// try to create given directory
@@ -53,12 +58,35 @@ class xsendfile
 				trigger_error('Directory does not exist', E_ERROR);
 				return false;
 			}
-		}
-		
+		}		
 		self::$_linkDir = $dir;
 
 		self::$_dirOk = is_writable($dir);
 		return self::$_dirOk;
+	}
+	
+	/**
+	* Sets disallowed extensions
+	* @param	array	the extensions
+	*/
+	public static function setDisallowedExtensions($extensions)
+	{
+		self::$_disallowedExt = $extensions;
+		return true;
+	}
+	
+	/**
+	* Add callback function
+	* @param	string		callback name
+	* @param	callable	a callable function
+	*/
+	public static function registerCallback($type, $function)
+	{
+		if (is_callable($function))
+		{
+			self::$_callbacks[$type] = $function;
+		}
+		return false;
 	}
 	
 	/**
@@ -98,30 +126,66 @@ class xsendfile
 	}
 	
 	/**
-	* returns if is right configured
+	* Sets the symlink-path when external link
+	* @param	string	 the path (variables: %host%, %path%)
+	* @return	bool	
+	*/
+	public static function setExtSymlinkPath($symlink)
+	{
+
+		self::$_externalUrlSymlink = $symlink;
+	}
+	
+	/**
+	* returns true if is correct configured
 	* @return	bool	plugin ok
 	*/
 	public static function isActive()
 	{
-		return self::$_dirOk;
+		$result = true;
+
+		// if dir is not set successfully
+		if (!self::$_dirOk)
+		{
+			$result = false;
+		}
+		// or the apache module is activated
+		elseif (php_sapi_name() == 'apache2handler')
+		{
+			$result = false;
+		}
+		return $result;
 	}
 	
 	/**
 	* Catches header, creates symlinks an redirects
+	* @param	callable	a function that works with the header-data (for use with zend, shopware, etc)
 	*/
-	public static function rewrite()
+	public static function rewrite($headerWorker = null)
 	{
+
+		if (is_null($headerWorker))
+			$headerWorker = self::$_headerWorker;
+		
+		error_reporting(E_ALL);
+
+		
+
 		// not active or header already sent
-		if (!self::isActive() || headers_sent())
+		if (!self::isActive())
 			return false;
+
+		$headerWorker('del', 'content-disposition');
+		$headerWorker('set', 'Content-Type', 'text/plain');
 		
 		$sendfile = false;
 		$filename = '';
-		foreach(headers_list() as $header)
+		$headers = $headerWorker('getall');
+
+		foreach($headers as $header)
 		{
 			// explode key and value
 			$data = explode(': ', $header);
-			
 			switch($data[0])
 			{
 				case 'X-Sendfile': // Apache version
@@ -135,15 +199,32 @@ class xsendfile
 				break;
 			}
 		}
+		
+		// check for external link
+		$sendfileInfo = parse_url($sendfile);
+		if (!empty($sendfileInfo['scheme']))
+		{
+			// if not set quit
+			if (empty(self::$_externalUrlSymlink))
+				return false;
+			
+			$sendfile = self::$_externalUrlSymlink;
+			$sendfile = str_replace('%host%', $sendfileInfo['host'], $sendfile);
+			$sendfile = str_replace('%path%', $sendfileInfo['path'], $sendfile);
+		}
+		
 		if ($sendfile === false)
 			return;
 		
 		// now remove no longer needed headers
-		header_remove('X-Sendfile');
-		header_remove('X-Accel-Redirect');
-		header_remove('X-Lighttpd-Sendfile');
-		header_remove('Content-Disposition');
+		$headerWorker('del', 'X-Sendfile');
+		$headerWorker('del', 'X-Accel-Redirect');
+		$headerWorker('del', 'X-Lighttpd-Sendfile');
+		$headerWorker('del', 'Content-Disposition');
 		
+		// debug things, let it in, doesnt matter when we forward and makes debugging easier
+		$headerWorker('set', 'Content-Type', 'text/plain');
+
 		// break the loop if available secret dir found
 		while(true)
 		{
@@ -151,38 +232,107 @@ class xsendfile
 			$secretDir = self::$_linkDir . $secret . '/'; // path to secret directory
 			if (!is_dir($secretDir))
 			{
-				// not a absolute path
-				if (substr($sendfile, 0, 1) != DIRECTORY_SEPARATOR)
-				{
-					// fixes for windows-os
-					if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN')
-					{
-						// need to add the drive letter
-						$sendfile = substr(__FILE__, 0, 1) . ':' . $sendfile;
-					}
-					else
-					{
-						// convert to absolute from $sendfile as seen from calling script-dir
-						$sendfile = dirname(getenv('SCRIPT_FILENAME')). '/' . $sendfile;
-					}
-				}
-				
+				$sendfile = self::makeAbsPath($sendfile);
+				$secretDir = self::makeAbsPath($secretDir);
+
 				// if no name, get filename
 				if (empty($filename))
 					$filename = basename($sendfile);
 				
-				mkdir($secretDir);
-				symlink($sendfile, $secretDir . utf8_decode($filename));
+				// check extension and forbid
+				if (in_array(pathinfo($filename, PATHINFO_EXTENSION), self::$_disallowedExt))
+				{
+					$noAuth = true;
+					
+					// call callback to check if redirect is allowed
+					if (isset(self::$_callbacks['forbiddenExtension']))
+					{
+						$result = call_user_func(self::$_callbacks['forbiddenExtension'], pathinfo($filename, PATHINFO_EXTENSION));
+						if ($result === true)
+							$noAuth = false;
+					}
+					
+					if ($noAuth)
+					{
+						$headerWorker('set', 'HTTP/1.0 403 Forbidden');
+						return;
+					}
+				}
 				
+				mkdir($secretDir);
+				symlink(urldecode($sendfile), $secretDir . utf8_decode(urldecode($filename)));
 				// create web path
 				if (!empty(self::$_linkDirUri))
 				{
 					$weburi = self::$_linkDirUri . $secret . '/' . $filename;
 				}
-				
-				header('Location: ' . $weburi);
-				break; // end the loop
+				$headerWorker('set', 'Location', $weburi, 1);
+				return; // end the loop
 			}
+		}
+	}
+	
+	/**
+	*	Makes a relative path absolute
+	*	@param	str	relative path
+	*	@return		absolute path
+	*/
+	public static function makeAbsPath($path)
+	{
+		
+		// On windows symlinks must have absolute paths
+		if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN')
+		{
+			$matchWinAbsolute = '~^([a-z]{1}):(\\/|\\\\)~i'; // regex for valid absolute path on windows
+			// no unc-path and no absolute path
+			if (substr($path, 0, 2) != '\\\\' && !preg_match($matchWinAbsolute, $path, $arMatches))
+			{
+				// is a absolute path but without the drive letter
+				if (substr($path, 0, 1) == '/')
+					$path = substr(getenv('SCRIPT_FILENAME'), 0, 1) . ':' . $path;
+				else // relative path
+					$path = dirname(getenv('SCRIPT_FILENAME')) . '/' . $path;
+			}
+
+		}
+		// Linux, Mac
+		// without trailing slash -> relative
+		elseif (substr($path, 0, 1) !== '/') 
+		{
+			$path = dirname(getenv('SCRIPT_FILENAME')) . '/' . $path;
+		}
+		return $path;
+	}
+	/*
+	*	Implements the default-functions for header-handling
+	*	@param	str	action to run
+	*	@param	str name of the header
+	*	@param	str	value of the header
+	*	@return	list of headers of result of the action
+	*/
+	protected static function headerWorker($action = 'get', $name = '', $value = '')
+	{
+		if (headers_sent())
+			return ($action == 'getall') ? [] : '';
+		switch($action)
+		{
+			// returns all already set header
+			case 'getall':
+				return headers_list();
+			break;
+			
+			// removes a header
+			case 'del';
+				return header_remove($name);
+			break;
+			
+			// sets a header and overwrites it
+			case 'set':
+				if (substr($name, 0, 5) == 'HTTP/')
+					return header($name);
+				else
+					return header($name . ': ' . $value, true);
+			break;
 		}
 	}
 	
@@ -191,7 +341,11 @@ class xsendfile
 	*/
 	public static function register()
 	{
-		register_shutdown_function(function() { $class = __CLASS__; $class::rewrite(); });
+		register_shutdown_function(function() 
+		{ 
+			$class = __CLASS__;
+			$class::rewrite(); 		
+		});
 	}
 	
 	/**
@@ -200,6 +354,13 @@ class xsendfile
 	**/
 	public static function runGBC()
 	{
+		if (!self::isActive())
+			return false;
+		
+		// save old value and disable error reporting
+		$oldER = error_reporting();
+		error_reporting(E_ERROR);
+		
 		$result = false;
 		$linkdirs = glob(self::$_linkDir . '*');
 		foreach($linkdirs as $linkdir)
@@ -212,10 +373,12 @@ class xsendfile
 			array_walk(glob($linkdir . '/*'), array(__CLASS__, 'unlink'));
 			
 			// and the dir itself
-			rmdir($linkdir);
-			$result = true;
+			if (rmdir($linkdir))
+				$result = true;
 		}
 		
+		// reset error reporting
+		error_reporting($oldER);
 		return $result;
 	}
 	

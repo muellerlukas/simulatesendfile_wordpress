@@ -18,12 +18,15 @@ class simulatesendfile
 		// add wordpress options
 		add_option('simulatesendfile_dir', 'symlinks');
 		add_option('simulatesendfile_expire', 3600);
-		
+		add_option('simulatesendfile_extsymlinkpath', '');
+	
 		// only if link dir could be created and is writable
 		if (xsendfile::setLinkDir(WP_CONTENT_DIR . '/' . get_option('simulatesendfile_dir', 'symlinks') . '/'))
 		{
+			
 			xsendfile::setLinkDirUri(content_url() . '/' . get_option('simulatesendfile_dir', 'symlinks') . '/');
 			xsendfile::setExpireTime(get_option('simulatesendfile_expire', 3600));
+			xsendfile::setExtSymlinkPath(get_option('simulatesendfile_extsymlinkpath', ''));
 			xsendfile::setSalt(NONCE_SALT);
 			xsendfile::register();
 		}
